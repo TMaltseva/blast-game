@@ -33,6 +33,13 @@ export class BoardView extends cc.Component {
   private pool: cc.Node[] = [];
   public readonly onTileTap = new Signal<{ row: number; col: number }>();
 
+  private static readonly SUPER_SPRITE_INDEX: Partial<Record<TileType, number>> = {
+    [TileType.SUPER_ROW]:  0,
+    [TileType.SUPER_COL]:  1,
+    [TileType.SUPER_BOMB]: 2,
+    [TileType.SUPER_ALL]:  3,
+  };
+
   onLoad() {
     this.node.zIndex = 0;
     if (this.node.children.length > 0) {
@@ -68,7 +75,8 @@ export class BoardView extends cc.Component {
     if (!view) {
       view = this.findViewAt(row, col) ?? undefined;
     }
-    view?.playInvalidTap();
+    const anchorX = this.colToX(col);
+    view?.playInvalidTap(anchorX);
   }
 
   private findViewAt(row: number, col: number): TileView | null {
@@ -95,19 +103,8 @@ export class BoardView extends cc.Component {
     this.clearBoard();
 
     for (const data of snapshot) {
-      const isSuper = data.type !== TileType.NORMAL;
-      const superIdx = isSuper
-        ? this.getSuperSpriteTypeIndex(data.type)
-        : undefined;
-      const view = this.spawnTileView(
-        data.id,
-        data.color,
-        data.row,
-        data.col,
-        isSuper,
-        superIdx,
-      );
-      if (isSuper) {
+      const view = this.spawnTileView(data.id, data.color, data.row, data.col, data.type);
+      if (data.type !== TileType.NORMAL) {
         view.playSuper();
       }
     }
@@ -120,7 +117,14 @@ export class BoardView extends cc.Component {
 
   public async applyTurnResult(
     result: TurnResult,
-    opts?: { bombEffectAt?: { row: number; col: number } },
+    opts?: {
+      bombEffectAt?: {
+        row: number;
+        col: number;
+        variant?: "bomb" | "lineRow" | "lineCol";
+      };
+      bombGhostRadius?: number;
+    },
   ): Promise<void> {
     if (result.shuffled && result.boardSnapshot) {
       await this.playShuffleAndRebuild(result.boardSnapshot);
@@ -133,8 +137,17 @@ export class BoardView extends cc.Component {
     }
 
     if (opts?.bombEffectAt) {
-      const w = this.worldPosForCell(opts.bombEffectAt.row, opts.bombEffectAt.col);
-      ParticlePool.playBombBurst(this.node, w);
+      const { row, col, variant = "bomb" } = opts.bombEffectAt;
+      const w = this.worldPosForCell(row, col);
+      if (variant === "lineRow") {
+        ParticlePool.playLinePetardBurst(this.node, w, "row");
+      } else if (variant === "lineCol") {
+        ParticlePool.playLinePetardBurst(this.node, w, "col");
+      } else {
+        ParticlePool.playBombBurst(this.node, w);
+        const ghostR = opts?.bombGhostRadius ?? 2;
+        this.playBombExplosionGhostShards(row, col, ghostR);
+      }
     }
 
     await this.playBurned(result.burned);
@@ -142,15 +155,7 @@ export class BoardView extends cc.Component {
     if (result.superSpawned) {
       const super_ = result.superSpawned;
       if (!this.tileMap.has(super_.id)) {
-        const typeIndex = this.getSuperSpriteTypeIndex(super_.type);
-        const view = this.spawnTileView(
-          super_.id,
-          super_.color,
-          super_.row,
-          super_.col,
-          true,
-          typeIndex,
-        );
+        const view = this.spawnTileView(super_.id, super_.color, super_.row, super_.col, super_.type);
         view.playSuper();
       } else {
         this.tileMap.get(super_.id)?.playSuper();
@@ -164,12 +169,9 @@ export class BoardView extends cc.Component {
   private async playBurned(burned: number[]): Promise<void> {
     const anims = burned.map((id) => {
       const view = this.tileMap.get(id);
-      if (!view) {
-        return Promise.resolve();
-      }
+      if (!view) return Promise.resolve();
       this.tileMap.delete(id);
-      return view
-        .playBurn(view.getColorIndex())
+      return view.playBurnAnimated()
         .then(() => this.returnToPool(view.node))
         .catch((e) => {
           console.error("playBurn error:", id, e);
@@ -194,13 +196,7 @@ export class BoardView extends cc.Component {
   private async playSpawns(spawns: TileSpawn[]): Promise<void> {
     const anims = spawns.map((spawn) => {
       const { tile } = spawn;
-      const view = this.spawnTileView(
-        tile.id,
-        tile.color,
-        tile.row,
-        tile.col,
-        false,
-      );
+      const view = this.spawnTileView(tile.id, tile.color, tile.row, tile.col);
       return view.playSpawn(tile.row, this.tileSize);
     });
     await Promise.all(anims);
@@ -238,6 +234,8 @@ export class BoardView extends cc.Component {
     const view = this.findViewAt(row, col);
     if (!view) return;
     cc.Tween.stopAllByTarget(view.node);
+    view.node.scaleX = 1;
+    view.node.scaleY = 1;
     cc.tween(view.node)
       .repeatForever(
         cc
@@ -289,43 +287,22 @@ export class BoardView extends cc.Component {
     });
   }
 
-  private getSuperSpriteTypeIndex(type: TileType): number | undefined {
-    const idx = [
-      TileType.SUPER_ROW,
-      TileType.SUPER_COL,
-      TileType.SUPER_BOMB,
-      TileType.SUPER_ALL,
-    ].indexOf(type);
-    return idx >= 0 ? idx : undefined;
-  }
-
   private spawnTileView(
     id: number,
     colorIndex: number,
     row: number,
     col: number,
-    isSuper = false,
-    superType?: number,
+    tileType: TileType = TileType.NORMAL,
   ): TileView {
     const node = this.getFromPool();
     const view = node.getComponent(TileView);
-
     view.reset();
 
-    if (
-      isSuper &&
-      superType !== undefined &&
-      this.superTileSprites[superType]
-    ) {
-      view.setupWithSprite(
-        id,
-        colorIndex,
-        this.superTileSprites[superType],
-        true,
-        this.tileSize,
-      );
+    const superSpriteIdx = BoardView.SUPER_SPRITE_INDEX[tileType];
+    if (superSpriteIdx !== undefined && this.superTileSprites[superSpriteIdx]) {
+      view.setupWithSprite(id, colorIndex, this.superTileSprites[superSpriteIdx], tileType, this.tileSize);
     } else {
-      view.setup(id, colorIndex, this.tileSprites, isSuper, this.tileSize);
+      view.setup(id, colorIndex, this.tileSprites, tileType, this.tileSize);
     }
 
     node.active = true;
@@ -350,6 +327,7 @@ export class BoardView extends cc.Component {
     node.opacity = 255;
     node.scaleX = 1;
     node.scaleY = 1;
+    node.angle = 0;
     node.removeFromParent(false);
     this.pool.push(node);
   }
@@ -370,5 +348,58 @@ export class BoardView extends cc.Component {
   private worldPosForCell(row: number, col: number): cc.Vec2 {
     const local = cc.v2(this.colToX(col), this.rowToY(row));
     return this.node.convertToWorldSpaceAR(local);
+  }
+
+  private playBombExplosionGhostShards(
+    row: number,
+    col: number,
+    radius: number,
+  ): void {
+    const centerX = this.colToX(col);
+    const centerY = this.rowToY(row);
+    const s = this.tileSize;
+    const maxDist = radius * s * 1.5;
+
+    this.tileMap.forEach((view) => {
+      const nx = view.node.x;
+      const ny = view.node.y;
+      const dx = nx - centerX;
+      const dy = ny - centerY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > maxDist) return;
+
+      const ghost = cc.instantiate(view.node);
+      ghost.opacity = 200;
+      ghost.angle = 0;
+      ghost.scaleX = view.node.scaleX;
+      ghost.scaleY = view.node.scaleY;
+      this.node.addChild(ghost, 100);
+
+      const angle =
+        dist < 1e-3 ? Math.random() * Math.PI * 2 : Math.atan2(dy, dx);
+      const force = (1 - dist / maxDist) * 150;
+      const targetX = nx + Math.cos(angle) * force;
+      const targetY = ny + Math.sin(angle) * force;
+      const rotation = (Math.random() - 0.5) * 360;
+
+      cc.Tween.stopAllByTarget(ghost);
+      cc.tween(ghost)
+        .to(
+          0.4,
+          {
+            x: targetX,
+            y: targetY,
+            opacity: 0,
+            scaleX: 0.3,
+            scaleY: 0.3,
+            angle: rotation,
+          },
+          { easing: "sineOut" },
+        )
+        .call(() => {
+          if (cc.isValid(ghost)) ghost.destroy();
+        })
+        .start();
+    });
   }
 }

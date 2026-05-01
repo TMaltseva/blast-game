@@ -8,12 +8,11 @@ export class GameSession {
   private shuffleCount: number = 0;
 
   private readonly targetScore: number;
-  private maxShuffles: number;
+  private readonly maxShuffles: number = 3;
 
   constructor(config: LevelConfig) {
     this.movesLeft = config.movesLimit;
     this.targetScore = config.targetScore;
-    this.maxShuffles = config.maxShuffles;
   }
 
   public addScore(points: number): void {
@@ -48,7 +47,6 @@ export class GameSession {
     return this.phase === GamePhase.PLAYING;
   }
 
-  // Проверяем победу и поражение после каждого хода
   public evaluate(hasValidMoves: boolean): void {
     if (this.score >= this.targetScore) {
       this.phase = GamePhase.WON;
@@ -70,6 +68,5 @@ export class GameSession {
     this.movesLeft = config.movesLimit;
     this.phase = GamePhase.PLAYING;
     this.shuffleCount = 0;
-    this.maxShuffles = config.maxShuffles;
   }
 }

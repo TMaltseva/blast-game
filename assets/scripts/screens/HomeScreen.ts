@@ -25,7 +25,7 @@ export class HomeScreen extends cc.Component {
         cc
           .tween()
           .to(0.6, { scaleX: 1.08, scaleY: 1.08 }, { easing: "sineInOut" })
-          .to(0.6, { scaleX: 1.0, scaleY: 1.0 }, { easing: "sineInOut" })
+          .to(0.6, { scaleX: 1.0, scaleY: 1.0 }, { easing: "sineInOut" }),
       )
       .start();
   }

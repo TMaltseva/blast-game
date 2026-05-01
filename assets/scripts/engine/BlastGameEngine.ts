@@ -6,10 +6,17 @@ import { Refill } from "./Refill";
 import { MoveValidator } from "./MoveValidator";
 import { ScoreCalculator } from "./ScoreCalculator";
 import { GameSession } from "./GameSession";
-import { TurnResult, TileBoardSnapshot } from "./TurnResult";
+import { TurnResult, TileBoardSnapshot, TileFall, TileSpawn } from "./TurnResult";
 import { TileData, TileType } from "./TileData";
 import { getBurnPolicyForTile, RadiusBurnPolicy } from "./BurnPolicy";
 import { LevelConfig } from "../config/LevelConfig";
+
+interface TapAction {
+  targets: TileData[];
+  superSpawned: TileData | null;
+  scoreInput: number;
+  originalTileId?: number;
+}
 
 export class BlastGameEngine {
   private board: BoardModel;
@@ -47,89 +54,10 @@ export class BlastGameEngine {
     const tile = this.board.getTile(row, col);
     if (!tile) return null;
 
-    const group =
-      tile.type === TileType.NORMAL
-        ? this.finder.findGroup(this.board, row, col)
-        : [];
+    const action = this.resolveTapAction(tile, row, col);
+    if (!action) return null;
 
-    if (tile.type === TileType.NORMAL && !this.finder.isValidGroup(group)) {
-      return null;
-    }
-
-    const policy = getBurnPolicyForTile(
-      tile,
-      group,
-      this.config.boosterBombRadius
-    );
-    const targets = policy.getTargets(this.board, tile);
-
-    let superSpawned: TileData | null = null;
-    if (
-      tile.type === TileType.NORMAL &&
-      group.length >= this.config.superTileThreshold
-    ) {
-      superSpawned = this.spawnSuperTile(row, col, targets, tile, group.length);
-    }
-
-    const burned: number[] = [];
-    for (const target of targets) {
-      if (superSpawned && target.id === superSpawned.id) continue;
-      burned.push(target.id);
-      this.board.removeTile(target.row, target.col);
-    }
-
-    if (superSpawned) {
-      burned.push(tile.id);
-    }
-
-    const falls = this.gravity.apply(this.board);
-    const spawns = this.refill.apply(this.board);
-
-    const score = this.calculator.calculate(
-      tile.type === TileType.NORMAL ? group.length : targets.length
-    );
-    this.session.addScore(score);
-    this.session.spendMove();
-
-    let shuffled = false;
-    while (
-      !this.validator.hasValidMoves(this.board) &&
-      this.session.canShuffle()
-    ) {
-      this.shuffleBoard();
-      this.session.incrementShuffle();
-      shuffled = true;
-    }
-
-    let boardSnapshot: TileBoardSnapshot[] | null = null;
-    if (shuffled) {
-      boardSnapshot = [];
-      this.board.forEachTile((t) => {
-        boardSnapshot!.push({
-          id: t.id,
-          color: t.color,
-          type: t.type,
-          row: t.row,
-          col: t.col,
-        });
-      });
-    }
-
-    this.session.evaluate(this.validator.hasValidMoves(this.board));
-
-    return {
-      burned,
-      falls,
-      spawns,
-      superSpawned,
-      score,
-      totalScore: this.session.getScore(),
-      movesLeft: this.session.getMovesLeft(),
-      phase: this.session.getPhase(),
-      shuffled,
-      boardSnapshot,
-      swap: null,
-    };
+    return this.processBurn(action.targets, action.superSpawned, action.scoreInput, action.originalTileId);
   }
 
   public applyTeleport(
@@ -182,49 +110,51 @@ export class BlastGameEngine {
     const policy = new RadiusBurnPolicy(this.config.boosterBombRadius);
     const targets = policy.getTargets(this.board, tile);
 
-    const burned: number[] = [];
-    for (const target of targets) {
-      burned.push(target.id);
-      this.board.removeTile(target.row, target.col);
+    return this.processBurn(targets, null, targets.length);
+  }
+
+  private resolveTapAction(tile: TileData, row: number, col: number): TapAction | null {
+    const group = tile.type === TileType.NORMAL
+      ? this.finder.findGroup(this.board, row, col)
+      : [];
+
+    if (tile.type === TileType.NORMAL && !this.finder.isValidGroup(group)) {
+      return null;
     }
 
-    const falls = this.gravity.apply(this.board);
-    const spawns = this.refill.apply(this.board);
-    const score = this.calculator.calculate(targets.length);
+    const policy = getBurnPolicyForTile(tile, group, this.config.boosterBombRadius);
+    const targets = policy.getTargets(this.board, tile);
+
+    let superSpawned: TileData | null = null;
+    let originalTileId: number | undefined;
+    if (tile.type === TileType.NORMAL && group.length >= this.config.superTileThreshold) {
+      superSpawned = this.spawnSuperTile(row, col, targets, tile, group.length);
+      originalTileId = tile.id;
+    }
+
+    const scoreInput = tile.type === TileType.NORMAL ? group.length : targets.length;
+    return { targets, superSpawned, scoreInput, originalTileId };
+  }
+
+  private processBurn(
+    targets: TileData[],
+    superSpawned: TileData | null,
+    scoreInput: number,
+    originalTileId?: number,
+  ): TurnResult {
+    const burned = this.burnTargets(targets, originalTileId);
+    const { falls, spawns } = this.applyPhysics();
+    const score = this.calculator.calculate(scoreInput);
     this.session.addScore(score);
     this.session.spendMove();
-
-    let shuffled = false;
-    while (
-      !this.validator.hasValidMoves(this.board) &&
-      this.session.canShuffle()
-    ) {
-      this.shuffleBoard();
-      this.session.incrementShuffle();
-      shuffled = true;
-    }
-
-    let boardSnapshot: TileBoardSnapshot[] | null = null;
-    if (shuffled) {
-      boardSnapshot = [];
-      this.board.forEachTile((t) => {
-        boardSnapshot!.push({
-          id: t.id,
-          color: t.color,
-          type: t.type,
-          row: t.row,
-          col: t.col,
-        });
-      });
-    }
-
+    const { shuffled, boardSnapshot } = this.tryEnsureValidMoves();
     this.session.evaluate(this.validator.hasValidMoves(this.board));
 
     return {
       burned,
       falls,
       spawns,
-      superSpawned: null,
+      superSpawned,
       score,
       totalScore: this.session.getScore(),
       movesLeft: this.session.getMovesLeft(),
@@ -233,6 +163,50 @@ export class BlastGameEngine {
       boardSnapshot,
       swap: null,
     };
+  }
+
+  private burnTargets(targets: TileData[], originalTileId?: number): number[] {
+    const burned: number[] = [];
+    for (const target of targets) {
+      burned.push(target.id);
+      this.board.removeTile(target.row, target.col);
+    }
+    if (originalTileId !== undefined) {
+      burned.push(originalTileId);
+    }
+    return burned;
+  }
+
+  private applyPhysics(): { falls: TileFall[]; spawns: TileSpawn[] } {
+    return {
+      falls: this.gravity.apply(this.board),
+      spawns: this.refill.apply(this.board),
+    };
+  }
+
+  private tryEnsureValidMoves(): { shuffled: boolean; boardSnapshot: TileBoardSnapshot[] | null } {
+    let shuffled = false;
+    while (!this.validator.hasValidMoves(this.board) && this.session.canShuffle()) {
+      this.shuffleBoard();
+      this.session.incrementShuffle();
+      shuffled = true;
+    }
+    return {
+      shuffled,
+      boardSnapshot: shuffled ? this.takeBoardSnapshot() : null,
+    };
+  }
+
+  private takeBoardSnapshot(): TileBoardSnapshot[] {
+    const snapshot: TileBoardSnapshot[] = [];
+    this.board.forEachTile((t) => snapshot.push({
+      id: t.id,
+      color: t.color,
+      type: t.type,
+      row: t.row,
+      col: t.col,
+    }));
+    return snapshot;
   }
 
   private pickSuperTileType(
@@ -281,7 +255,6 @@ export class BlastGameEngine {
     const tiles: TileData[] = [];
     this.board.forEachTile((t) => tiles.push(t));
 
-    //Fisher-Yates shuffle
     for (let i = tiles.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       const tileA = tiles[i];
@@ -308,17 +281,7 @@ export class BlastGameEngine {
   }
 
   public getBoardSnapshot(): TileBoardSnapshot[] {
-    const snapshot: TileBoardSnapshot[] = [];
-    this.board.forEachTile((t) =>
-      snapshot.push({
-        id: t.id,
-        color: t.color,
-        type: t.type,
-        row: t.row,
-        col: t.col,
-      })
-    );
-    return snapshot;
+    return this.takeBoardSnapshot();
   }
 
   public getSession(): GameSession {

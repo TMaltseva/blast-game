@@ -8,7 +8,7 @@ export const defaultLevelConfig = {
   minMovesBeforeSuperAll: 10,
   boosterBombRadius: 2,
   tileColors: 5,
-  tileSize: 90,
+  tileSize: 80,
   maxShuffles: 3,
 };
 

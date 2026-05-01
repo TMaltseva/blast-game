@@ -1,4 +1,5 @@
 import { ParticlePool } from "../utils/ParticlePool";
+import { TileType } from "../engine/TileData";
 const { ccclass, property } = cc._decorator;
 
 @ccclass
@@ -11,18 +12,18 @@ export class TileView extends cc.Component {
 
   private tileId: number = -1;
   private colorIndex: number = 0;
-  private isSuperTile: boolean = false;
+  private tileType: TileType = TileType.NORMAL;
 
   public setup(
     id: number,
     colorIndex: number,
     spriteFrames: cc.SpriteFrame[],
-    isSuper = false,
-    tileSize: number = 60
+    tileType: TileType = TileType.NORMAL,
+    tileSize: number = 60,
   ): void {
     this.tileId = id;
     this.colorIndex = colorIndex;
-    this.isSuperTile = isSuper;
+    this.tileType = tileType;
     this.sprite.sizeMode = cc.Sprite.SizeMode.CUSTOM;
     this.node.width = tileSize;
     this.node.height = tileSize;
@@ -37,12 +38,12 @@ export class TileView extends cc.Component {
     id: number,
     colorIndex: number,
     spriteFrame: cc.SpriteFrame,
-    isSuper: boolean,
-    tileSize: number = 60
+    tileType: TileType = TileType.NORMAL,
+    tileSize: number = 60,
   ): void {
     this.tileId = id;
     this.colorIndex = colorIndex;
-    this.isSuperTile = isSuper;
+    this.tileType = tileType;
     this.sprite.spriteFrame = spriteFrame;
     this.sprite.sizeMode = cc.Sprite.SizeMode.CUSTOM;
 
@@ -63,7 +64,70 @@ export class TileView extends cc.Component {
   }
 
   public isSuper(): boolean {
-    return this.isSuperTile;
+    return this.tileType !== TileType.NORMAL;
+  }
+
+  public async playBurnAnimated(): Promise<void> {
+    switch (this.tileType) {
+      case TileType.SUPER_ROW:
+        await this.playRocketLaunch("horizontal");
+        break;
+      case TileType.SUPER_COL:
+        await this.playRocketLaunch("vertical");
+        break;
+    }
+    await this.playBurn();
+  }
+
+  public playRocketLaunch(direction: "horizontal" | "vertical"): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.node.parent || !cc.isValid(this.node)) {
+        resolve();
+        return;
+      }
+
+      cc.Tween.stopAllByTarget(this.node);
+      this.node.scaleX = 1;
+      this.node.scaleY = 1;
+
+      const ghost = cc.instantiate(this.node);
+      ghost.opacity = 255;
+      ghost.angle = this.node.angle;
+      ghost.scaleX = this.node.scaleX;
+      ghost.scaleY = this.node.scaleY;
+      this.node.parent.addChild(ghost, 100);
+      ghost.setPosition(this.node.x, this.node.y);
+
+      const distance = 800;
+      const targetX =
+        direction === "horizontal" ? this.node.x + distance : this.node.x;
+      const targetY =
+        direction === "vertical" ? this.node.y - distance : this.node.y;
+
+      cc.Tween.stopAllByTarget(ghost);
+      cc.tween(ghost)
+        .to(
+          0.4,
+          {
+            x: targetX,
+            y: targetY,
+            opacity: 0,
+            scaleX: 0.5,
+            scaleY: 1.5,
+          },
+          { easing: "sineIn" },
+        )
+        .call(() => {
+          if (cc.isValid(ghost)) ghost.destroy();
+          resolve();
+        })
+        .start();
+
+      cc.tween(this.node)
+        .to(0.1, { scaleX: 1.3, scaleY: 0.7 })
+        .to(0.1, { scaleX: 1.0, scaleY: 1.0 })
+        .start();
+    });
   }
 
   public playSpawn(toRow: number, tileSize: number): Promise<void> {
@@ -84,7 +148,7 @@ export class TileView extends cc.Component {
     });
   }
 
-  public playBurn(colorIndex: number): Promise<void> {
+  private playBurn(): Promise<void> {
     return new Promise((resolve) => {
       if (!this.node.active || !cc.isValid(this.node)) {
         resolve();
@@ -92,9 +156,9 @@ export class TileView extends cc.Component {
       }
 
       const worldPos = this.node.parent.convertToWorldSpaceAR(
-        cc.v2(this.node.x, this.node.y)
+        cc.v2(this.node.x, this.node.y),
       );
-      ParticlePool.playBurst(this.node.parent, worldPos, colorIndex);
+      ParticlePool.playBurst(this.node.parent, worldPos, this.colorIndex);
 
       cc.tween(this.node)
         .to(0.1, { scaleX: 1.2, scaleY: 1.2 })
@@ -143,27 +207,27 @@ export class TileView extends cc.Component {
         cc
           .tween()
           .to(0.5, { scaleX: 1.1, scaleY: 1.1 })
-          .to(0.5, { scaleX: 1.0, scaleY: 1.0 })
+          .to(0.5, { scaleX: 1.0, scaleY: 1.0 }),
       )
       .start();
   }
 
-  public playInvalidTap(): void {
+  public playInvalidTap(anchorX: number): void {
     if (!cc.isValid(this.node) || !this.node.active) {
       return;
     }
     cc.Tween.stopAllByTarget(this.node);
+    this.node.x = anchorX;
 
-    const x = this.node.x;
     const a = 10;
     const dur = 0.06;
 
     cc.tween(this.node)
-      .to(dur, { x: x - a })
-      .to(dur, { x: x + a })
-      .to(dur, { x: x - a })
-      .to(dur, { x: x + a })
-      .to(dur, { x: x })
+      .to(dur, { x: anchorX - a })
+      .to(dur, { x: anchorX + a })
+      .to(dur, { x: anchorX - a })
+      .to(dur, { x: anchorX + a })
+      .to(dur, { x: anchorX })
       .start();
   }
 
@@ -171,7 +235,8 @@ export class TileView extends cc.Component {
     cc.Tween.stopAllByTarget(this.node);
     this.node.active = true;
     this.node.opacity = 255;
+    this.node.angle = 0;
     this.tileId = -1;
-    this.isSuperTile = false;
+    this.tileType = TileType.NORMAL;
   }
 }

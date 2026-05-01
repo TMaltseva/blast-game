@@ -21,6 +21,8 @@ export class BoosterPanel extends cc.Component {
   private activeBooster: "bomb" | "teleport" | null = null;
   private teleportIconPulseActive: boolean = false;
   private inputEnabled: boolean = true;
+  private bombButtonRestX = 0;
+  private teleportButtonRestX = 0;
 
   public onBoosterStateChanged: (() => void) | null = null;
 
@@ -29,9 +31,16 @@ export class BoosterPanel extends cc.Component {
     this.teleportButton.on(
       cc.Node.EventType.TOUCH_END,
       this.onTeleportClick,
-      this
+      this,
     );
     this.updateUI();
+    this.captureBoosterButtonRestX();
+    this.scheduleOnce(() => this.captureBoosterButtonRestX(), 0);
+  }
+
+  private captureBoosterButtonRestX(): void {
+    if (this.bombButton) this.bombButtonRestX = this.bombButton.x;
+    if (this.teleportButton) this.teleportButtonRestX = this.teleportButton.x;
   }
 
   onDestroy() {
@@ -64,18 +73,40 @@ export class BoosterPanel extends cc.Component {
 
   private onBombClick(): void {
     if (!this.inputEnabled) return;
+    if (this.bombCount <= 0) {
+      this.playInvalidShake(this.bombButton, this.bombButtonRestX);
+      return;
+    }
     playBubblePop();
-    if (this.bombCount <= 0) return;
     this.activeBooster = this.activeBooster === "bomb" ? null : "bomb";
     this.updateUI();
   }
 
   private onTeleportClick(): void {
     if (!this.inputEnabled) return;
+    if (this.teleportCount <= 0) {
+      this.playInvalidShake(this.teleportButton, this.teleportButtonRestX);
+      return;
+    }
     playBubblePop();
-    if (this.teleportCount <= 0) return;
     this.activeBooster = this.activeBooster === "teleport" ? null : "teleport";
     this.updateUI();
+  }
+
+  /** Как у тайла при неверном тапе — лёгкое горизонтальное подёргивание всей кнопки. */
+  private playInvalidShake(target: cc.Node | null, restX: number): void {
+    if (!target || !cc.isValid(target) || !target.active) return;
+    cc.Tween.stopAllByTarget(target);
+    target.x = restX;
+    const a = 10;
+    const dur = 0.06;
+    cc.tween(target)
+      .to(dur, { x: restX - a })
+      .to(dur, { x: restX + a })
+      .to(dur, { x: restX - a })
+      .to(dur, { x: restX + a })
+      .to(dur, { x: restX })
+      .start();
   }
 
   public spendBooster(type: "bomb" | "teleport"): void {
@@ -122,7 +153,7 @@ export class BoosterPanel extends cc.Component {
       this.onTeleportIconPulse,
       0.65,
       cc.macro.REPEAT_FOREVER,
-      0.12
+      0.12,
     );
   }
 

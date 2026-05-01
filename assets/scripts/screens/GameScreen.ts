@@ -1,11 +1,12 @@
 import { BoardView } from "../views/BoardView";
 import { BlastGameEngine } from "../engine/BlastGameEngine";
-import { getLevelConfig } from "../config/LevelConfig";
+import { getLevelConfig, LevelConfig } from "../config/LevelConfig";
 import { GamePhase, TurnResult } from "../engine/TurnResult";
 import { ResultScreen } from "./ResultScreen";
 import { BoosterPanel } from "./BoosterPanel";
 import { HomeScreen } from "./HomeScreen";
 import { TileType } from "../engine/TileData";
+import { ParticlePool } from "../utils/ParticlePool";
 
 const { ccclass, property } = cc._decorator;
 
@@ -50,6 +51,7 @@ export class GameScreen extends cc.Component {
   @property(cc.AudioClip)
   bubblePopSound: cc.AudioClip = null;
 
+  private config!: LevelConfig;
   private engine: BlastGameEngine = null;
   private isProcessing: boolean = false;
   private teleportFirstTile: { row: number; col: number } | null = null;
@@ -59,18 +61,11 @@ export class GameScreen extends cc.Component {
   };
 
   onLoad() {
-    const config = getLevelConfig();
-    this.boardView.tileSize = config.tileSize;
-    const boardWidth = config.cols * config.tileSize;
-    const boardHeight = config.rows * config.tileSize;
-    const boardX = -boardWidth / 2;
-    const boardY = boardHeight / 2;
-    this.boardView.node.x = boardX;
-    this.boardView.node.y = boardY;
+    this.config = getLevelConfig();
+    ParticlePool.preloadSharedParticleSprite();
+    this.layoutBoardPosition(this.config);
 
-    this.layoutBoardBg();
-
-    this.engine = new BlastGameEngine(config);
+    this.engine = new BlastGameEngine(this.config);
 
     const snapshot = this.engine.getBoardSnapshot();
     this.boardView.onTileTap.connect(this.tileTapHandler);
@@ -111,10 +106,21 @@ export class GameScreen extends cc.Component {
     this.boardView.clearHighlight();
   }
 
+  private layoutBoardPosition(config: LevelConfig): void {
+    this.boardView.tileSize = config.tileSize;
+    const boardWidth = config.cols * config.tileSize;
+    const boardHeight = config.rows * config.tileSize;
+    const boardX = -boardWidth / 2;
+    const boardLiftY = 100;
+    const boardY = boardHeight / 2 + boardLiftY;
+    this.boardView.node.x = boardX;
+    this.boardView.node.y = boardY;
+    this.layoutBoardBg();
+  }
+
   private layoutBoardBg(): void {
-    const config = getLevelConfig();
-    const gridWidth = config.cols * config.tileSize;
-    const gridHeight = config.rows * config.tileSize;
+    const gridWidth = this.config.cols * this.config.tileSize;
+    const gridHeight = this.config.rows * this.config.tileSize;
     const extraBgWidth = 20;
     const extraBgHeight = 20;
     const boardBg = this.boardView.node.getChildByName("BoardBg");
@@ -145,24 +151,27 @@ export class GameScreen extends cc.Component {
 
     const activeBooster = this.boosterPanel?.getActiveBooster();
 
-    if (activeBooster === "bomb") {
-      const result = this.engine.applyBoosterBomb(row, col);
-      if (!result) {
-        const t = this.engine.getTile(row, col);
-        this.boardView.playInvalidTapAt(row, col, t?.id);
-        this.playIncorrectSound();
-        return;
+    if (activeBooster != null) {
+      switch (activeBooster) {
+        case "bomb": {
+          const result = this.engine.applyBoosterBomb(row, col);
+          if (!result) {
+            const t = this.engine.getTile(row, col);
+            this.boardView.playInvalidTapAt(row, col, t?.id);
+            this.playIncorrectSound();
+            return;
+          }
+          this.boosterPanel.spendBooster("bomb");
+          await this.runTurnResultFlow(result, {
+            bombEffectAt: { row, col, variant: "bomb" },
+            bombGhostRadius: this.config.boosterBombRadius,
+          });
+          return;
+        }
+        case "teleport":
+          void this.handleTeleportTap(row, col);
+          return;
       }
-      this.boosterPanel.spendBooster("bomb");
-      await this.runTurnResultFlow(result, {
-        bombEffectAt: { row, col },
-      });
-      return;
-    }
-
-    if (activeBooster === "teleport") {
-      void this.handleTeleportTap(row, col);
-      return;
     }
 
     const tappedTile = this.engine.getTile(row, col);
@@ -174,9 +183,31 @@ export class GameScreen extends cc.Component {
       return;
     }
 
-    const isSuperBomb = tappedTile?.type === TileType.SUPER_BOMB;
+    const tileType = tappedTile?.type;
+    let bombEffectAt:
+      | {
+          row: number;
+          col: number;
+          variant: "bomb" | "lineRow" | "lineCol";
+        }
+      | undefined;
+    switch (tileType) {
+      case TileType.SUPER_BOMB:
+        bombEffectAt = { row, col, variant: "bomb" };
+        break;
+      case TileType.SUPER_ROW:
+        bombEffectAt = { row, col, variant: "lineRow" };
+        break;
+      case TileType.SUPER_COL:
+        bombEffectAt = { row, col, variant: "lineCol" };
+        break;
+    }
     await this.runTurnResultFlow(result, {
-      bombEffectAt: isSuperBomb ? { row, col } : undefined,
+      bombEffectAt,
+      bombGhostRadius:
+        bombEffectAt?.variant === "bomb"
+          ? this.config.boosterBombRadius
+          : undefined,
     });
   }
 
@@ -212,7 +243,12 @@ export class GameScreen extends cc.Component {
   private async runTurnResultFlow(
     result: TurnResult,
     options: {
-      bombEffectAt?: { row: number; col: number };
+      bombEffectAt?: {
+        row: number;
+        col: number;
+        variant?: "bomb" | "lineRow" | "lineCol";
+      };
+      bombGhostRadius?: number;
     } = {},
   ): Promise<void> {
     this.isProcessing = true;
@@ -241,7 +277,10 @@ export class GameScreen extends cc.Component {
     }, 3000);
 
     try {
-      await this.boardView.applyTurnResult(result, { bombEffectAt });
+      await this.boardView.applyTurnResult(result, {
+        bombEffectAt,
+        bombGhostRadius: options.bombGhostRadius,
+      });
 
       clearTimeout(timeout);
 
@@ -291,11 +330,10 @@ export class GameScreen extends cc.Component {
   }
 
   private updateHUD(score?: number, moves?: number): void {
-    const config = getLevelConfig();
     const s = score ?? this.engine.getSession().getScore();
     const m = moves ?? this.engine.getSession().getMovesLeft();
 
-    this.scoreLabel.string = `Scores:\n${s} / ${config.targetScore}`;
+    this.scoreLabel.string = `Scores:\n${s} / ${this.config.targetScore}`;
     this.movesLabel.string = `${m}`;
   }
 
@@ -307,7 +345,6 @@ export class GameScreen extends cc.Component {
       console.error("resultScreen is null!");
       return;
     }
-    const config = getLevelConfig();
     this.resultScreen.node.active = true;
     if (this.winSound) {
       cc.audioEngine.playEffect(this.winSound, false);
@@ -316,7 +353,7 @@ export class GameScreen extends cc.Component {
       true,
       this.engine.getSession().getScore(),
       this.engine.getSession().getMovesLeft(),
-      config.targetScore,
+      this.config.targetScore,
     );
   }
 
@@ -324,14 +361,13 @@ export class GameScreen extends cc.Component {
     if (this.boosterPanel) {
       this.boosterPanel.node.active = false;
     }
-    const config = getLevelConfig();
     this.resultScreen.node.active = true;
     this.playSparkleEffect();
     this.resultScreen.setup(
       false,
       this.engine.getSession().getScore(),
       this.engine.getSession().getMovesLeft(),
-      config.targetScore,
+      this.config.targetScore,
     );
   }
 
@@ -341,26 +377,8 @@ export class GameScreen extends cc.Component {
   }
 
   public goToHomeMenu(): void {
-    this.clearTeleportSelection();
-    this.isProcessing = false;
-    if (this.resultScreen) {
-      this.resultScreen.node.active = false;
-    }
-    if (this.boosterPanel) {
-      this.boosterPanel.node.active = true;
-      this.boosterPanel.setInputEnabled(true);
-    }
-
-    this.engine.reset();
-    const snapshot = this.engine.getBoardSnapshot();
-    this.boardView.tileSize = getLevelConfig().tileSize;
-    const { rows, cols } = this.engine.getBoardSize();
-    this.boardView.buildBoard(snapshot, rows, cols);
-    this.layoutBoardBg();
-    this.updateHUD();
-
-    this.boardView.onTileTap.disconnect(this.tileTapHandler);
-    this.boardView.onTileTap.connect(this.tileTapHandler);
+    this.restartBackgroundMusicFromStart();
+    this.resetEngineAndBoard();
 
     const canvas = this.node.parent;
     const home = canvas?.getChildByName("HomeScreen")?.getComponent(HomeScreen);
@@ -368,30 +386,38 @@ export class GameScreen extends cc.Component {
   }
 
   public restartGame(): void {
+    this.resetEngineAndBoard();
+
+    const canvas = this.node.parent;
+    const home = canvas?.getChildByName("HomeScreen")?.getComponent(HomeScreen);
+    home?.showGameHideHome();
+  }
+
+  private restartBackgroundMusicFromStart(): void {
+    if (!this.bgMusic) return;
+    cc.audioEngine.stopMusic();
+    cc.audioEngine.playMusic(this.bgMusic, true);
+  }
+
+  private resetEngineAndBoard(): void {
     this.clearTeleportSelection();
+    this.isProcessing = false;
+    if (this.resultScreen) {
+      this.resultScreen.node.active = false;
+    }
     if (this.boosterPanel) {
       this.boosterPanel.node.active = true;
       this.boosterPanel.setInputEnabled(true);
     }
-    this.engine.reset();
-    if (this.resultScreen) {
-      this.resultScreen.node.active = false;
-    }
-    this.isProcessing = false;
 
+    this.engine.reset();
     const snapshot = this.engine.getBoardSnapshot();
-    this.boardView.tileSize = getLevelConfig().tileSize;
+    this.layoutBoardPosition(this.config);
     const { rows, cols } = this.engine.getBoardSize();
     this.boardView.buildBoard(snapshot, rows, cols);
-    this.layoutBoardBg();
     this.updateHUD();
 
     this.boardView.onTileTap.disconnect(this.tileTapHandler);
     this.boardView.onTileTap.connect(this.tileTapHandler);
-
-    const canvas = this.node.parent;
-    const homeNode = canvas?.getChildByName("HomeScreen");
-    const home = homeNode?.getComponent(HomeScreen);
-    home?.showGameHideHome();
   }
 }
